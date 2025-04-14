@@ -13,7 +13,7 @@ https://tuwel.tuwien.ac.at/pluginfile.php/4422884/mod_resource/content/1/Exercis
 1. a “traditional” IR model, cf. Crash Course IR Block
 2. a “neural” NLP representation learning approach
 3. a “neural” re-ranking model
-4. report
+4. report - https://www.overleaf.com/2214395211rbsnzbrtrtjc#424aba
 
 ## Deadlines
 - 04/25 CLEF registration -- DONE
