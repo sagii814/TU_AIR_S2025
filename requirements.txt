@@ -1,0 +1,4 @@
+pymed>=0.8.9
+biopython>=1.81
+beautifulsoup4>=4.12.2
+lxml>=5.0
