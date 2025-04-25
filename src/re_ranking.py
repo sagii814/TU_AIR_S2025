@@ -1,5 +1,6 @@
 import torch
 import os
+import orjson
 import transformers
 from torch.utils.data import Dataset, DataLoader
 from torch.nn import MarginRankingLoss
@@ -10,6 +11,7 @@ from typing import List, Tuple
 import random
 from collections import defaultdict
 import time
+import warnings
 from functools import wraps
 
 
@@ -120,9 +122,12 @@ def create_inference_input_from_result(result_path: str, training_path: str, out
 
 # Load training data
 @timer
-def load_training_data(path: str) -> List[Tuple[str, str, str]]:
+def load_training_data(path: str, test_run: bool = False) -> List[Tuple[str, str, str]]:
     with open(path, 'r') as f:
         data = json.load(f)
+    if test_run:
+        warnings.warn("Running smoke test! Only 100 tuples will be used for training.")
+        data = data[:100]
     return [(x['query'], x['positive'], x['negative']) for x in data]
 
 
@@ -148,23 +153,30 @@ class TripletDataset(Dataset):
 
 
 class InferenceDataset(Dataset):
-    def __init__(self, pairs):
+    def __init__(self, pairs, tokenizer):
         self.pairs = pairs
+        self.tokenizer = tokenizer
 
     def __len__(self):
         return len(self.pairs)
 
     def __getitem__(self, idx):
         q, d = self.pairs[idx]['query'], self.pairs[idx]['document']
-        enc = tokenizer(q, d, truncation=True, padding='max_length', max_length=MAX_LEN, return_tensors='pt')
-        return q, self.pairs[idx]['doc_id'], enc
+        enc = self.tokenizer(q, d, truncation=True, padding='max_length', max_length=MAX_LEN, return_tensors='pt')
+
+        return {
+            'query': q,
+            'doc_id': self.pairs[idx]['doc_id'],
+            'input_ids': enc['input_ids'].squeeze(0),
+            'attention_mask': enc['attention_mask'].squeeze(0)
+        }
 
 
-def train_re_ranking():
+def train_re_ranking(test_run: bool = False):
     loss_fn = MarginRankingLoss(margin=1.0)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
 
-    train_data = load_training_data(os.path.join('data', 'train_triples.json'))
+    train_data = load_training_data(os.path.join('data', 'train_triples.json'), test_run=test_run)
     dataset = TripletDataset(train_data)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
@@ -200,28 +212,39 @@ def train_re_ranking():
 
 
 @timer
-def run_inference(model_path: str, inference_data_path: str, output_path: str):
+def run_inference(model_path: str,
+                  inference_data_path: str,
+                  output_path: str,
+                  batch_size: int = 16,
+                  num_workers: int = 4):
     print("Loading model for inference...")
     model = BertForSequenceClassification.from_pretrained(model_path).to(device)
     tokenizer = BertTokenizer.from_pretrained(model_path)
     model.eval()
 
-    with open(inference_data_path, 'r') as f:
-        raw_data = json.load(f)
+    with open(inference_data_path, 'rb') as f:
+        raw_data = orjson.loads(f.read())
 
-    dataset = InferenceDataset(raw_data)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
+    dataset = InferenceDataset(raw_data, tokenizer)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     results = []
     with torch.no_grad():
-        for q, doc_id, enc in dataloader:
-            input_ids = enc['input_ids'].squeeze(1).to(device)
-            attention_mask = enc['attention_mask'].squeeze(1).to(device)
-            output = model(input_ids=input_ids, attention_mask=attention_mask).logits.squeeze().item()
-            results.append({"query": q, "doc_id": doc_id, "score": output})
+        for batch in dataloader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
 
-    with open(output_path, 'w') as f:
-        json.dump(results, f, indent=2)
+            output = model(input_ids=input_ids, attention_mask=attention_mask).logits.cpu().numpy()
+
+            for i in range(len(batch['query'])):
+                results.append({
+                    "query": batch['query'][i],
+                    "doc_id": batch['doc_id'][i],
+                    "score": output[i].tolist()
+                })
+
+    with open(output_path, 'wb') as f:
+        f.write(orjson.dumps(results))
 
 
 @timer
@@ -232,11 +255,12 @@ def evaluate_reranker(predictions_path: str, training_path: str):
     qrels = build_gold_labels(training_path)
     rankings = defaultdict(list)
     for p in preds:
-        rankings[p['query']].append((p['doc_id'], p['score']))
+        query_key = " ".join(p['query']) if isinstance(p['query'], list) else p['query']
+        rankings[query_key].append((p['doc_id'], p['score']))
 
     def compute_metrics(ranked, relevant):
         ranked = sorted(ranked, key=lambda x: x[1], reverse=True)
-        retrieved = [doc_id for doc_id, _ in ranked[:TOP_K]]
+        retrieved = [doc[0][0] for doc in ranked[:TOP_K]]
         rel_set = set(relevant)
         hits = [1 if doc in rel_set else 0 for doc in retrieved]
 
@@ -250,6 +274,7 @@ def evaluate_reranker(predictions_path: str, training_path: str):
             if doc in rel_set:
                 num_hits += 1
                 ap += num_hits / (i + 1)
+
         ap = ap / len(rel_set) if rel_set else 0
 
         return ap, p10, r10, f1
@@ -275,6 +300,7 @@ def evaluate_reranker(predictions_path: str, training_path: str):
 
 # Example usage
 if __name__ == "__main__":
+    SMOKE_TEST_RUN = True
     create_train_triples_from_bioasq(
         os.path.join('data', 'training13b.json'),
         os.path.join('results', 'bm25_predictions.json'),
@@ -287,7 +313,7 @@ if __name__ == "__main__":
         os.path.join('data', 'inference_input.json')
     )
 
-    train_re_ranking()
+    train_re_ranking(test_run=SMOKE_TEST_RUN)
 
     run_inference(
         'bert_reranker_model',
