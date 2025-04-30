@@ -54,7 +54,7 @@ def build_gold_labels(training_path: str) -> dict:
         train_data = json.load(f)
     qrels = {}
     for q in train_data['questions']:
-        qrels[q['body']] = [extract_pubmed_id(url) for url in q.get('documents', [])]
+        qrels[q['id']] = [extract_pubmed_id(url) for url in q.get('documents', [])]
     return qrels
 
 
@@ -85,7 +85,7 @@ def create_train_triples_from_bioasq(training_path: str, result_path: str, outpu
         if qid not in bm25_data or not bm25_data[qid]['documents']:
             continue
 
-        relevant = set(qrels.get(qtext, []))
+        relevant = set(qrels.get(qid, []))
         candidates = bm25_data[qid]['documents']
 
         positives = [doc for doc in candidates if doc in relevant]
@@ -107,14 +107,21 @@ def create_train_triples_from_bioasq(training_path: str, result_path: str, outpu
 
 @timer
 def create_inference_input_from_result(result_path: str, training_path: str, output_path: str):
-    bm25_data = build_bm25_data(result_path)
+    with open(result_path, 'r', encoding='utf-8') as f:
+        result_data = json.load(f)
+    bm25_dict = defaultdict(lambda: defaultdict(str))
+    for q in result_data['questions']:
+        for snippet in q.get('snippets', []):
+            doc_id = extract_pubmed_id(snippet['document'])
+            bm25_dict[q['id']][doc_id] += " " + snippet['text']
+
     with open(training_path, 'r', encoding='utf-8') as f:
         questions = {q['id']: q['body'] for q in json.load(f)['questions']}
 
     pairs = []
     for qid, qtext in questions.items():
-        for doc_id, snippet in bm25_data[qid]['documents'].items():
-            pairs.append({"query": qtext, "document": snippet, "doc_id": doc_id})
+        for doc_id, snippet in bm25_dict[qid].items():
+            pairs.append({"id": qid, "query": qtext, "document": snippet, "doc_id": doc_id})
 
     with open(output_path, 'w') as f:
         json.dump(pairs, f, indent=2)
@@ -161,12 +168,14 @@ class InferenceDataset(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, idx):
-        q, d = self.pairs[idx]['query'], self.pairs[idx]['document']
+        item = self.pairs[idx]
+        q, d = item['query'], item['document']
         enc = self.tokenizer(q, d, truncation=True, padding='max_length', max_length=MAX_LEN, return_tensors='pt')
 
         return {
             'query': q,
-            'doc_id': self.pairs[idx]['doc_id'],
+            'qid': item['id'],
+            'doc_id': item['doc_id'],
             'input_ids': enc['input_ids'].squeeze(0),
             'attention_mask': enc['attention_mask'].squeeze(0)
         }
@@ -212,11 +221,11 @@ def train_re_ranking(test_run: bool = False):
 
 
 @timer
-def run_inference(model_path: str,
-                  inference_data_path: str,
-                  output_path: str,
-                  batch_size: int = 16,
-                  num_workers: int = 4):
+def run_inference(model_path: str, 
+                    inference_data_path: str, 
+                    output_path: str, 
+                    batch_size: int = 16, 
+                    num_workers: int = 4):
     print("Loading model for inference...")
     model = BertForSequenceClassification.from_pretrained(model_path).to(device)
     tokenizer = BertTokenizer.from_pretrained(model_path)
@@ -233,12 +242,10 @@ def run_inference(model_path: str,
         for batch in dataloader:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
-
             output = model(input_ids=input_ids, attention_mask=attention_mask).logits.cpu().numpy()
-
             for i in range(len(batch['query'])):
                 results.append({
-                    "query": batch['query'][i],
+                    "qid": batch['qid'][i],
                     "doc_id": batch['doc_id'][i],
                     "score": output[i].tolist()
                 })
@@ -255,12 +262,11 @@ def evaluate_reranker(predictions_path: str, training_path: str):
     qrels = build_gold_labels(training_path)
     rankings = defaultdict(list)
     for p in preds:
-        query_key = " ".join(p['query']) if isinstance(p['query'], list) else p['query']
-        rankings[query_key].append((p['doc_id'], p['score']))
+        rankings[p['qid']].append((p['doc_id'], p['score']))
 
     def compute_metrics(ranked, relevant):
         ranked = sorted(ranked, key=lambda x: x[1], reverse=True)
-        retrieved = [doc[0][0] for doc in ranked[:TOP_K]]
+        retrieved = [doc[0] for doc in ranked[:TOP_K]]
         rel_set = set(relevant)
         hits = [1 if doc in rel_set else 0 for doc in retrieved]
 
@@ -281,10 +287,10 @@ def evaluate_reranker(predictions_path: str, training_path: str):
 
     total_ap, total_p, total_r, total_f1 = 0, 0, 0, 0
     count = 0
-    for q in rankings:
-        if q not in qrels:
+    for qid in rankings:
+        if qid not in qrels:
             continue
-        ap, p, r, f1 = compute_metrics(rankings[q], qrels[q])
+        ap, p, r, f1 = compute_metrics(rankings[qid], qrels[qid])
         total_ap += ap
         total_p += p
         total_r += r
@@ -298,9 +304,8 @@ def evaluate_reranker(predictions_path: str, training_path: str):
     print(f"F1@10: {total_f1 / count:.4f}")
 
 
-# Example usage
 if __name__ == "__main__":
-    SMOKE_TEST_RUN = True
+    SMOKE_TEST_RUN = False
     create_train_triples_from_bioasq(
         os.path.join('data', 'training13b.json'),
         os.path.join('results', 'bm25_predictions.json'),
