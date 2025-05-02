@@ -17,17 +17,18 @@ from functools import wraps
 
 # Load tokenizer and model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-model = BertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=1)
+tokenizer = BertTokenizer.from_pretrained('dmis-lab/biobert-base-cased-v1.1')
+model = BertForSequenceClassification.from_pretrained('dmis-lab/biobert-base-cased-v1.1', num_labels=1)
 model.to(device)
 print(f"Training on device: {device}")
 
 # Configs
 BATCH_SIZE = 16
-EPOCHS = 3
+EPOCHS = 4
 MAX_LEN = 256
 LEARNING_RATE = 2e-5
 TOP_K = 10
+MARGIN_RANKING_LOSS = 0.5
 transformers.logging.set_verbosity_error()
 
 
@@ -94,7 +95,16 @@ def create_train_triples_from_bioasq(training_path: str, result_path: str, outpu
         for pos_id in positives:
             if not negatives:
                 continue
-            neg_id = random.choice(negatives)
+
+            negatives_sorted = sorted(
+                negatives,
+                key=lambda doc_id: len(candidates[doc_id].split()),
+                reverse=True
+            )
+
+            hard_neg_candidates = negatives_sorted[:3]
+            neg_id = random.choice(hard_neg_candidates)
+
             triples.append({
                 "query": qtext,
                 "positive": candidates[pos_id],
@@ -182,7 +192,7 @@ class InferenceDataset(Dataset):
 
 
 def train_re_ranking(test_run: bool = False):
-    loss_fn = MarginRankingLoss(margin=1.0)
+    loss_fn = MarginRankingLoss(margin=MARGIN_RANKING_LOSS)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
 
     train_data = load_training_data(os.path.join('data', 'train_triples.json'), test_run=test_run)
@@ -221,87 +231,101 @@ def train_re_ranking(test_run: bool = False):
 
 
 @timer
-def run_inference(model_path: str, 
-                    inference_data_path: str, 
-                    output_path: str, 
-                    batch_size: int = 16, 
-                    num_workers: int = 4):
-    print("Loading model for inference...")
-    model = BertForSequenceClassification.from_pretrained(model_path).to(device)
-    tokenizer = BertTokenizer.from_pretrained(model_path)
+def run_inference(model_path: str,
+                  inference_data_path: str,
+                  output_path: str,
+                  batch_size: int = 16,
+                  num_workers: int = 4):
+    model = BertForSequenceClassification.from_pretrained(model_path)
+    model.to(device)
     model.eval()
 
-    with open(inference_data_path, 'rb') as f:
-        raw_data = orjson.loads(f.read())
+    inference_pairs = []
+    with open(inference_data_path, 'r') as f:
+        inference_pairs = json.load(f)
 
-    dataset = InferenceDataset(raw_data, tokenizer)
+    dataset = InferenceDataset(inference_pairs, tokenizer)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-    results = []
+    results = defaultdict(list)
+
     with torch.no_grad():
         for batch in dataloader:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
-            output = model(input_ids=input_ids, attention_mask=attention_mask).logits.cpu().numpy()
-            for i in range(len(batch['query'])):
-                results.append({
-                    "qid": batch['qid'][i],
-                    "doc_id": batch['doc_id'][i],
-                    "score": output[i].tolist()
-                })
 
-    with open(output_path, 'wb') as f:
-        f.write(orjson.dumps(results))
+            logits = model(input_ids=input_ids, attention_mask=attention_mask).logits.squeeze(-1).cpu().numpy()
+
+            for i in range(len(logits)):
+                qid = batch['qid'][i]
+                doc_id = batch['doc_id'][i]
+                score = float(logits[i])
+                results[qid].append((doc_id, score))
+
+    # Rank and keep top-k
+    rerank_output = {}
+    for qid, doc_scores in results.items():
+        top_docs = sorted(doc_scores, key=lambda x: x[1], reverse=True)[:TOP_K]
+        rerank_output[qid] = [doc_id for doc_id, _ in top_docs]
+
+    with open(output_path, 'w') as f:
+        json.dump(rerank_output, f, indent=2)
 
 
 @timer
 def evaluate_reranker(predictions_path: str, training_path: str):
+    # Load predictions
     with open(predictions_path, 'r') as f:
-        preds = json.load(f)
+        predictions = json.load(f)
 
+    # Load gold qrels
     qrels = build_gold_labels(training_path)
-    rankings = defaultdict(list)
-    for p in preds:
-        rankings[p['qid']].append((p['doc_id'], p['score']))
 
-    def compute_metrics(ranked, relevant):
-        ranked = sorted(ranked, key=lambda x: x[1], reverse=True)
-        retrieved = [doc[0] for doc in ranked[:TOP_K]]
-        rel_set = set(relevant)
-        hits = [1 if doc in rel_set else 0 for doc in retrieved]
+    p_at_10 = []
+    r_at_10 = []
+    f1_at_10 = []
+    average_precisions = []
 
-        p10 = sum(hits) / TOP_K
-        r10 = sum(hits) / len(rel_set) if rel_set else 0
-        f1 = (2 * p10 * r10 / (p10 + r10)) if (p10 + r10) else 0
-
-        ap = 0.0
-        num_hits = 0
-        for i, doc in enumerate(retrieved):
-            if doc in rel_set:
-                num_hits += 1
-                ap += num_hits / (i + 1)
-
-        ap = ap / len(rel_set) if rel_set else 0
-
-        return ap, p10, r10, f1
-
-    total_ap, total_p, total_r, total_f1 = 0, 0, 0, 0
-    count = 0
-    for qid in rankings:
-        if qid not in qrels:
+    for qid, predicted_docs in predictions.items():
+        gold_docs = set(qrels.get(qid, []))
+        if not gold_docs:
             continue
-        ap, p, r, f1 = compute_metrics(rankings[qid], qrels[qid])
-        total_ap += ap
-        total_p += p
-        total_r += r
-        total_f1 += f1
-        count += 1
 
-    print("Evaluation Results:")
-    print(f"MAP:   {total_ap / count:.4f}")
-    print(f"P@10:  {total_p / count:.4f}")
-    print(f"R@10:  {total_r / count:.4f}")
-    print(f"F1@10: {total_f1 / count:.4f}")
+        predicted_set = predicted_docs[:TOP_K]
+        hits = [1 if doc in gold_docs else 0 for doc in predicted_set]
+
+        # Precision@10, Recall@10, F1@10
+        retrieved_relevant = sum(hits)
+        total_relevant = len(gold_docs)
+
+        precision = retrieved_relevant / len(predicted_set)
+        recall = retrieved_relevant / total_relevant if total_relevant > 0 else 0
+        f1 = (2 * precision * recall) / (precision + recall) if precision + recall > 0 else 0
+
+        p_at_10.append(precision)
+        r_at_10.append(recall)
+        f1_at_10.append(f1)
+
+        # Average Precision (AP)
+        num_hits = 0
+        sum_precisions = 0.0
+        for rank, is_hit in enumerate(hits, start=1):
+            if is_hit:
+                num_hits += 1
+                sum_precisions += num_hits / rank
+
+        ap = sum_precisions / total_relevant if total_relevant > 0 else 0.0
+        average_precisions.append(ap)
+
+    map_score = sum(average_precisions) / len(average_precisions) if average_precisions else 0.0
+    mean_p = sum(p_at_10) / len(p_at_10) if p_at_10 else 0.0
+    mean_r = sum(r_at_10) / len(r_at_10) if r_at_10 else 0.0
+    mean_f1 = sum(f1_at_10) / len(f1_at_10) if f1_at_10 else 0.0
+
+    print(f"Mean Average Precision (MAP): {map_score:.4f}")
+    print(f"Precision@{TOP_K}: {mean_p:.4f}")
+    print(f"Recall@{TOP_K}: {mean_r:.4f}")
+    print(f"F1@{TOP_K}: {mean_f1:.4f}")
 
 
 if __name__ == "__main__":
