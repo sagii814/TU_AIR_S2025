@@ -55,7 +55,7 @@ def fetch_and_cache_abstracts(pubmed_ids, fetcher, cache_path):
 
 if __name__ == "__main__":
     # Inputs
-    BIOASQ_JSON = "../data/test.json"
+    BIOASQ_JSON = "../data/training13b.json"
     CACHE_FILE = "../data/pubmed_abstracts_cache.json"
     EMAIL = "your@email.com"
     TOOL = "BM25Pipeline"
