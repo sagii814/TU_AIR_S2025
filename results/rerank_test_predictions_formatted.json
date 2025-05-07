@@ -1,0 +1,75 @@
+{
+  "questions": [
+    {
+      "id": "67e6cf2618b1e36f2e0000d0",
+      "documents": [
+        "http://www.ncbi.nlm.nih.gov/pubmed/19892633",
+        "http://www.ncbi.nlm.nih.gov/pubmed/2575692"
+      ]
+    },
+    {
+      "id": "680d5e47353a4a2e6b000005",
+      "documents": [
+        "http://www.ncbi.nlm.nih.gov/pubmed/313731",
+        "http://www.ncbi.nlm.nih.gov/pubmed/19529061",
+        "http://www.ncbi.nlm.nih.gov/pubmed/17725169"
+      ]
+    },
+    {
+      "id": "680f4a68353a4a2e6b000007",
+      "documents": [
+        "http://www.ncbi.nlm.nih.gov/pubmed/12853484",
+        "http://www.ncbi.nlm.nih.gov/pubmed/32266704"
+      ]
+    },
+    {
+      "id": "680a083218b1e36f2e00014d",
+      "documents": [
+        "http://www.ncbi.nlm.nih.gov/pubmed/26156998"
+      ]
+    },
+    {
+      "id": "67e5557c18b1e36f2e0000ac",
+      "documents": [
+        "http://www.ncbi.nlm.nih.gov/pubmed/29583027",
+        "http://www.ncbi.nlm.nih.gov/pubmed/19643113"
+      ]
+    },
+    {
+      "id": "6810fef8353a4a2e6b000016",
+      "documents": [
+        "http://www.ncbi.nlm.nih.gov/pubmed/10843242",
+        "http://www.ncbi.nlm.nih.gov/pubmed/28336098"
+      ]
+    },
+    {
+      "id": "6810cb23353a4a2e6b000012",
+      "documents": [
+        "http://www.ncbi.nlm.nih.gov/pubmed/37743207",
+        "http://www.ncbi.nlm.nih.gov/pubmed/23114244",
+        "http://www.ncbi.nlm.nih.gov/pubmed/32266704"
+      ]
+    },
+    {
+      "id": "680bc7a718b1e36f2e000156",
+      "documents": [
+        "http://www.ncbi.nlm.nih.gov/pubmed/20962578",
+        "http://www.ncbi.nlm.nih.gov/pubmed/15346807"
+      ]
+    },
+    {
+      "id": "67e56f2018b1e36f2e0000b0",
+      "documents": [
+        "http://www.ncbi.nlm.nih.gov/pubmed/23199349",
+        "http://www.ncbi.nlm.nih.gov/pubmed/20232113"
+      ]
+    },
+    {
+      "id": "67fe5f0918b1e36f2e000144",
+      "documents": [
+        "http://www.ncbi.nlm.nih.gov/pubmed/15717219",
+        "http://www.ncbi.nlm.nih.gov/pubmed/20973886"
+      ]
+    }
+  ]
+}
