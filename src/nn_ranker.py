@@ -18,7 +18,7 @@ def load_abstracts(cache_file: str):
         print(f"Failed to load abstracts: {e}")
         return {}
     
-def load_training_data(json_file: str):
+def load_query_data(json_file: str):
     """
     Load training data from the JSON training file
     Return: List[Dict[questions]]
@@ -29,10 +29,6 @@ def load_training_data(json_file: str):
     except Exception as e:
         print(f"Failed to load abstracts: {e}")
         return {}
-
-def get_pubmed_id_from_url(url: str) -> str:
-    """Extract the PubMed ID from a full URL"""
-    return url.split("/")[-1]
     
 # --- Model ---
 def compute_doc_embeddings(abstracts_dict, model, batch_size):
@@ -53,7 +49,7 @@ class PubMedQueryDataset(Dataset):
         return {
             "id": item["id"],
             "query": item["body"],
-            "doc_ids": [get_pubmed_id_from_url(url) for url in item.get("documents", [])]
+            "doc_ids": [url.split("/")[-1] for url in item.get("documents", [])]
         }
 
 def collate_fn(batch):
@@ -120,7 +116,7 @@ def compute_metrics(retrieved_ids, ground_truth):
         'average_precision': average_precision
     }
 
-def run_retrieval(model_name, training_data, abstracts_dict, debug=False, batch_size=8):
+def run_retrieval(model_name, query_data, abstracts_dict, debug=False, batch_size=8):
     # Load model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SentenceTransformer(model_name)
@@ -134,19 +130,20 @@ def run_retrieval(model_name, training_data, abstracts_dict, debug=False, batch_
     doc_embeddings_all = torch.stack([doc_embedding_map[doc_id] for doc_id in doc_ids_all]).to(device) # shape: (num_docs, embedding_dim)
 
     # Dataset and loader
-    dataset = PubMedQueryDataset(training_data)
+    dataset = PubMedQueryDataset(query_data)
     loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
 
     # Initialize output
     output = {"questions": []}
 
-    #Initialize metrics
+    # If ground truth available, initialize metrics
+    compute_eval = any(item.get("documents", None) for item in query_data)
     total_metrics = {
         "precision": 0.0,
         "recall": 0.0,
         "f1": 0.0,
         "average_precision": 0.0
-    }
+    } if compute_eval else None
     num_queries = 0
     
     for batch_idx, (ids, queries, ground_truth_ids) in tqdm(enumerate(loader), total=len(loader)):
@@ -161,10 +158,11 @@ def run_retrieval(model_name, training_data, abstracts_dict, debug=False, batch_
             top_k_idx = torch.topk(scores, k=10).indices
             ranked_doc_ids = [doc_ids_all[j] for j in top_k_idx]
 
-            metrics = compute_metrics(ranked_doc_ids, ground_truth_ids[i])
-            for key in total_metrics:
-                total_metrics[key] += metrics[key]
-            num_queries += 1
+            if compute_eval:
+                metrics = compute_metrics(ranked_doc_ids, ground_truth_ids[i])
+                for key in total_metrics:
+                    total_metrics[key] += metrics[key]
+                num_queries += 1
 
             snippets = []
             for doc_id in ranked_doc_ids:
@@ -179,10 +177,31 @@ def run_retrieval(model_name, training_data, abstracts_dict, debug=False, batch_
                 "documents": [f"http://www.ncbi.nlm.nih.gov/pubmed/{doc_id}" for doc_id in ranked_doc_ids],
                 "snippets": snippets
             })
-
-    avg_metrics = {key: val / num_queries for key, val in total_metrics.items()}
+    if compute_eval:
+        avg_metrics = {key: val / num_queries for key, val in total_metrics.items()}
+    else:
+        avg_metrics = {}
 
     return output, avg_metrics
+
+def save_results(model_name, results, metrics):
+    # Save metrics to txt if available
+    if metrics:
+        with open(f"../results/{model_name}_eval.txt", "w", encoding="utf-8") as f:
+            f.write("Evaluation Results:\n")
+            f.write(f"MAP:       {metrics['average_precision']:.4f}\n")
+            f.write(f"P@10:      {metrics['precision']:.4f}\n")
+            f.write(f"R@10:      {metrics['recall']:.4f}\n")
+            f.write(f"F1@10:     {metrics['f1']:.4f}\n")
+        print(f"Evaluation metrics saved to ../results/{model_name}_eval.txt")
+    else:
+        print("Evaluation metrics not computed.")
+
+    # Save results
+    with open(f"../results/{model_name}_output.json", "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Output saved to ../results/{model_name}_output.json")
+
 
 # ------
 if __name__ == "__main__":
@@ -191,29 +210,24 @@ if __name__ == "__main__":
 
     print("Loading data...")
     abstracts_dict = load_abstracts("../data/pubmed_abstracts.json")
-    training_data = load_training_data("../data/training13b.json")
+    #training_data = load_query_data("../data/training13b.json")
+    test_data = load_query_data("../data/BioASQ-task13bPhaseA-testset4")
 
     # run ranking
     #model_name = 'sentence-transformers/all-MiniLM-L6-v2'
-    model_name = 'pritamdeka/BioBERT-mnli-snli-scinli-scitail-mednli-stsb'
+    #model_name = 'pritamdeka/BioBERT-mnli-snli-scinli-scitail-mednli-stsb'
+    model_name = 'pritamdeka/S-PubMedBert-MS-MARCO'
+
     results, metrics = run_retrieval(
-        model_name,
-        training_data,
-        abstracts_dict,
+        model_name=model_name,
+        query_data=test_data,
+        abstracts_dict=abstracts_dict,
         debug=debug,
         batch_size=8
     )
 
-    # Save metrics to txt
-    with open("../results/bio_nn_eval.txt", "w", encoding="utf-8") as f:
-        f.write("Evaluation Results:\n")
-        f.write(f"MAP:       {metrics['average_precision']:.4f}\n")
-        f.write(f"P@10:      {metrics['precision']:.4f}\n")
-        f.write(f"R@10:      {metrics['recall']:.4f}\n")
-        f.write(f"F1@10:     {metrics['f1']:.4f}\n")
-    print("Evaluation metrics saved to ../results/basic_nn_eval.txt")
+    # Save results to json ang aggregated metrics to txt
+    save_results("nn_pudmed_test4", results, metrics)
 
-    # Save results
-    with open("../results/bio_nn_output.json", "w") as f:
-        json.dump(results, f, indent=2)
-    print("Output saved to ../results/nn_output.json")
+
+    
