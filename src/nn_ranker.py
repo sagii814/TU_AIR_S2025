@@ -120,10 +120,10 @@ def compute_metrics(retrieved_ids, ground_truth):
         'average_precision': average_precision
     }
 
-def run_retrieval(training_data, abstracts_dict, debug=False, batch_size=8):
+def run_retrieval(model_name, training_data, abstracts_dict, debug=False, batch_size=8):
     # Load model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+    model = SentenceTransformer(model_name)
     model.to(device)
     print(f"Model loaded on device: {device}")
 
@@ -193,7 +193,11 @@ if __name__ == "__main__":
     abstracts_dict = load_abstracts("../data/pubmed_abstracts.json")
     training_data = load_training_data("../data/training13b.json")
 
+    # run ranking
+    #model_name = 'sentence-transformers/all-MiniLM-L6-v2'
+    model_name = 'pritamdeka/BioBERT-mnli-snli-scinli-scitail-mednli-stsb'
     results, metrics = run_retrieval(
+        model_name,
         training_data,
         abstracts_dict,
         debug=debug,
@@ -201,7 +205,7 @@ if __name__ == "__main__":
     )
 
     # Save metrics to txt
-    with open("../results/basic_nn_eval.txt", "w", encoding="utf-8") as f:
+    with open("../results/bio_nn_eval.txt", "w", encoding="utf-8") as f:
         f.write("Evaluation Results:\n")
         f.write(f"MAP:       {metrics['average_precision']:.4f}\n")
         f.write(f"P@10:      {metrics['precision']:.4f}\n")
@@ -210,6 +214,6 @@ if __name__ == "__main__":
     print("Evaluation metrics saved to ../results/basic_nn_eval.txt")
 
     # Save results
-    with open("../results/nn_output.json", "w") as f:
+    with open("../results/bio_nn_output.json", "w") as f:
         json.dump(results, f, indent=2)
     print("Output saved to ../results/nn_output.json")
