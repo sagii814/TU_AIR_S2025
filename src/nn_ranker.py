@@ -59,7 +59,7 @@ def collate_fn(batch):
     doc_ids = [item["doc_ids"] for item in batch]
     return ids, queries, doc_ids
 
-def extract_snippets(model, query_embedding, abstract, doc_id, top_n_sent, threshold):
+def extract_snippets(model, query_embedding, abstract, doc_id, threshold):
     """Extract relevant sentences with character offsets """
     # Create sentence embeddings
     sentences = re.split(r'(?<=[.!?])\s+', abstract.strip())
@@ -69,28 +69,28 @@ def extract_snippets(model, query_embedding, abstract, doc_id, top_n_sent, thres
 
     # Rank sentences by similarity, extract top n
     similarities = util.cos_sim(query_embedding, sentence_embeddings)[0]  # shape: (num_sentences,)
-    top_indices = torch.topk(similarities, k=min(top_n_sent, len(sentences))).indices.tolist()
     
-    snippets = []
-    for idx in top_indices:
-        score = similarities[idx].item()
-        if score < threshold: # keep only if similar enough -> arg
+    snippet_candidates = []
+    for idx, score_tensor in enumerate(similarities):
+        if score_tensor.item() < threshold: # keep only if similar enough -> arg
             continue
 
         snippet_text = sentences[idx]
         char_start = abstract.find(snippet_text)
         char_end = char_start + len(snippet_text)
 
-        snippets.append({
+        snippet_candidates.append({
             "document": f"http://www.ncbi.nlm.nih.gov/pubmed/{doc_id}",
             "beginSection": "abstract",
             "endSection": "abstract",
             "offsetInBeginSection": char_start,
             "offsetInEndSection": char_end,
-            "text": snippet_text
+            "text": snippet_text,
+            "score": score_tensor.item()
         })
 
-    return snippets
+
+    return snippet_candidates
 
 def compute_metrics(retrieved_ids, ground_truth):
     """Compute evaluation metrics for retrieved documents"""
@@ -164,19 +164,26 @@ def run_retrieval(model_name, query_data, abstracts_dict, debug=False, batch_siz
                     total_metrics[key] += metrics[key]
                 num_queries += 1
 
-            snippets = []
+            # Extract snippets
+            snippet_candidates = []
             for doc_id in ranked_doc_ids:
                 abstract = abstracts_dict.get(doc_id, "")
                 if not abstract.strip():
                     continue
-                top_snippets = extract_snippets(model, query_embeddings[i], abstract, doc_id, top_n_sent=5, threshold=0.6)
-                snippets.extend(top_snippets)
+                snippets = extract_snippets(model, query_embeddings[i], abstract, doc_id, threshold=0.6)
+                snippet_candidates.extend(snippets)
+            
+            # Keep only top 10
+            top_snippets = sorted(snippet_candidates, key=lambda x: x["score"], reverse=True)[:10]
+            for snippet in top_snippets:
+                snippet.pop("score", None)
 
             output["questions"].append({
                 "id": qid,
                 "documents": [f"http://www.ncbi.nlm.nih.gov/pubmed/{doc_id}" for doc_id in ranked_doc_ids],
                 "snippets": snippets
             })
+
     if compute_eval:
         avg_metrics = {key: val / num_queries for key, val in total_metrics.items()}
     else:
@@ -227,7 +234,7 @@ if __name__ == "__main__":
     )
 
     # Save results to json ang aggregated metrics to txt
-    save_results("nn_pudmed_test4", results, metrics)
+    save_results("nn_pubmed_test4", results, metrics)
 
 
     
