@@ -9,6 +9,8 @@ from typing import List, Tuple, Dict
 BIOASQ_PATH = "../data/training13b.json"
 ABSTRACT_CACHE = "../data/pubmed_abstracts.json"
 OUTPUT_JSON = "../results/bm25_predictions.json"
+TESTSET_PATH = "../data/BioASQ-task13bPhaseA-testset4"
+TEST_OUTPUT_JSON = "../results/bm25_test_predictions.json"
 TOP_K_DOCUMENTS = 10
 TOP_N_SNIPPETS = 10
 
@@ -108,7 +110,8 @@ def extract_snippets(query: str, abstract: str, doc_id: str, top_n: int = 10) ->
     # Rank and take top n unique snippets (can refine scoring)
     unique_snippets = {}
     for snippet, score in candidate_snippets:
-        unique_snippets[f"{snippet['beginSection']}-{snippet['offsetInBeginSection']}-{snippet['offsetInEndSection']}"] = snippet
+        key = f"{snippet['beginSection']}-{snippet['offsetInBeginSection']}-{snippet['offsetInEndSection']}"
+        unique_snippets[key] = snippet
 
     sorted_snippets = list(unique_snippets.values())[:top_n]
     return sorted_snippets
@@ -150,6 +153,9 @@ def average_precision(retrieved: List[str], relevant: List[str]) -> float:
 
 
 if __name__ == "__main__":
+    #For the Training set
+
+    """
     print("Loading cached abstracts...")
     abstracts_dict = load_cached_abstracts(ABSTRACT_CACHE)
     if not abstracts_dict:
@@ -214,6 +220,72 @@ if __name__ == "__main__":
     print(f"\nSaving predictions to {OUTPUT_JSON}")
     Path("../results").mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_JSON, 'w', encoding='utf-8') as f:
+        json.dump({"questions": predictions}, f, indent=2, ensure_ascii=False)
+
+    print("Done")
+    """
+
+    #For the Batch 4 Test Set: BioASQ-task13bPhaseA-testset4
+
+    print("Loading cached abstracts...")
+    abstracts_dict = load_cached_abstracts(ABSTRACT_CACHE)
+    if not abstracts_dict:
+        exit()
+
+    print("Building BM25 index...")
+    bm25, doc_ids = build_bm25_index(abstracts_dict)
+
+    print("Loading BioASQ test questions...")
+    test_questions = load_bioasq_questions(TESTSET_PATH)
+
+    total_p, total_r, total_f1, total_ap, count = 0, 0, 0, 0, 0
+    predictions = []
+
+    print("Running BM25 retrieval and evaluation on test questions...")
+    for q in tqdm(test_questions):
+        query = q['body']
+        qid = q['id']
+        gold_ids = get_gold_doc_ids(q)
+
+        retrieved_ids, _ = bm25_retrieve_top_k(bm25, doc_ids, query, k=TOP_K_DOCUMENTS)
+
+        if gold_ids:
+            precision = precision_at_k(retrieved_ids, gold_ids, k=TOP_K_DOCUMENTS)
+            recall = recall_at_k(retrieved_ids, gold_ids, k=TOP_K_DOCUMENTS)
+            f1 = f1_at_k(retrieved_ids, gold_ids, k=TOP_K_DOCUMENTS)
+            ap = average_precision(retrieved_ids, gold_ids)
+            total_p += precision
+            total_r += recall
+            total_f1 += f1
+            total_ap += ap
+            count += 1
+
+        all_snippets = []
+        for doc_id in retrieved_ids:
+            abstract = abstracts_dict.get(doc_id, "")
+            snippets = extract_snippets(query, abstract, doc_id, top_n=TOP_N_SNIPPETS)
+            all_snippets.extend(snippets)
+
+        top_snippets = all_snippets[:TOP_N_SNIPPETS]
+
+        predictions.append({
+            "id": qid,
+            "documents": [f"http://www.ncbi.nlm.nih.gov/pubmed/{doc_id}" for doc_id in retrieved_ids],
+            "snippets": top_snippets
+        })
+
+    if count > 0:
+        print("\nEvaluation Results on test set:")
+        print(f"MAP:       {total_ap / count:.4f}")
+        print(f"P@{TOP_K_DOCUMENTS}:   {total_p / count:.4f}")
+        print(f"R@{TOP_K_DOCUMENTS}:   {total_r / count:.4f}")
+        print(f"F1@{TOP_K_DOCUMENTS}:  {total_f1 / count:.4f}")
+    else:
+        print("\nNo test questions with gold standard documents found for evaluation.")
+
+    print(f"\nSaving test predictions to {TEST_OUTPUT_JSON}")
+    Path("../results").mkdir(parents=True, exist_ok=True)
+    with open(TEST_OUTPUT_JSON, 'w', encoding='utf-8') as f:
         json.dump({"questions": predictions}, f, indent=2, ensure_ascii=False)
 
     print("Done")
